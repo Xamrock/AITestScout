@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "name": "Login Flow Fixture",
+  "description": "Test data for login and authentication flows",
+  "patterns": {
+    "emailField": "test.user@example.com",
+    "passwordField": "${TEST_PASSWORD}",
+    "pattern:contains:email": "user@company.com",
+    "pattern:contains:password": "SecurePassword123!",
+    "pattern:contains:phone": "555-0123",
+    "pattern:regex:card.*[Nn]umber": "4242424242424242",
+    "semantic:email": "demo@test.com",
+    "semantic:zipCode": "94103",
+    "screen:login|field:email": "admin@testapp.com",
+    "screen:login|field:password": "AdminPass123!",
+    "screen:checkout|field:email": "customer@shop.com"
+  },
+  "defaults": {
+    "email": "default@example.com",
+    "phone": "555-9999",
+    "name": "Test User",
+    "address": "123 Test St",
+    "city": "San Francisco",
+    "state": "CA",
+    "zipCode": "94105"
+  },
+  "fallbackMode": "aiGenerated"
+}

@@ -103,6 +103,16 @@ public class Scout: XCTestCase, @unchecked Sendable {
             try await AICrawler()
         }
 
+        // Set fixture if provided in config
+        if let fixture = config.fixture {
+            try testCase.xcAwait {
+                await crawler.setFixture(fixture)
+            }
+            if config.verboseOutput {
+                print("🔧 Using custom test data fixture")
+            }
+        }
+
         // REUSES: ActionExecutor (new wrapper around XCUIApplication)
         let executor = ActionExecutor(app: app)
 

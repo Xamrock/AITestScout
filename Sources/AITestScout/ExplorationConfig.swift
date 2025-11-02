@@ -65,6 +65,11 @@ public struct ExplorationConfig: Sendable {
     /// Default: 2 (try primary + up to 2 alternatives)
     public var maxRetries: Int
 
+    /// Test data fixture for providing values during exploration
+    /// When nil, uses default value generation behavior
+    /// Default: nil
+    public var fixture: ExplorationFixture?
+
     /// Initialize with default configuration
     public init(
         steps: Int = 20,
@@ -80,7 +85,8 @@ public struct ExplorationConfig: Sendable {
         topP: Double = 0.9,
         enableVerification: Bool = true,
         maxRetries: Int = 2,
-        saveToProjectRoot: Bool = false
+        saveToProjectRoot: Bool = false,
+        fixture: ExplorationFixture? = nil
     ) {
         self.steps = steps
         self.goal = goal
@@ -98,6 +104,7 @@ public struct ExplorationConfig: Sendable {
         self.enableVerification = enableVerification
         self.maxRetries = max(maxRetries, 0) // Ensure non-negative
         self.saveToProjectRoot = saveToProjectRoot
+        self.fixture = fixture
     }
 
     /// Create a CI-friendly configuration with deterministic settings

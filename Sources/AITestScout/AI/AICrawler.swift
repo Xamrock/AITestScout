@@ -26,6 +26,9 @@ public class AICrawler {
     /// Optional delegate for observing crawler events and extending behavior
     public weak var delegate: AICrawlerDelegate?
 
+    /// Fixture resolver for generating test values
+    private var fixtureResolver: FixtureResolver?
+
     /// Initialize the AI crawler
     /// - Parameters:
     ///   - maxTokens: Maximum tokens to send to the model (default: 3000, max: 4096)
@@ -62,6 +65,12 @@ public class AICrawler {
     /// - Throws: Errors if file cannot be loaded
     public func resumeExploration(from url: URL) throws {
         self.explorationPath = try ExplorationPath.load(from: url)
+    }
+
+    /// Set the test data fixture for value generation
+    /// - Parameter fixture: Fixture to use for generating test values (nil = use defaults)
+    public func setFixture(_ fixture: ExplorationFixture?) {
+        self.fixtureResolver = FixtureResolver(fixture: fixture)
     }
 
     /// Ask the AI to decide the next action using multiple choice (more reliable)
@@ -139,7 +148,7 @@ public class AICrawler {
         let lastAction = previousAction ?? explorationPath?.lastAction
 
         // Build action choices from hierarchy
-        let choices = buildActionChoices(from: hierarchy, visited: visitedSet)
+        let choices = try await buildActionChoices(from: hierarchy, visited: visitedSet, screenType: hierarchy.screenType)
 
         guard !choices.isEmpty else {
             // No valid choices - return done
@@ -421,7 +430,11 @@ public class AICrawler {
     // MARK: - Multiple Choice Implementation
 
     /// Builds a list of valid action choices from the hierarchy
-    private func buildActionChoices(from hierarchy: CompressedHierarchy, visited: Set<String>) -> [ActionChoice] {
+    private func buildActionChoices(
+        from hierarchy: CompressedHierarchy,
+        visited: Set<String>,
+        screenType: ScreenType?
+    ) async throws -> [ActionChoice] {
         var choices: [ActionChoice] = []
         var choiceNumber = 1
 
@@ -476,13 +489,20 @@ public class AICrawler {
                     adjustedPriority = Int(Double(adjustedPriority) * 1.25)
                 }
 
-                let description = "Type \"test@example.com\" into \(elementId)\(valueInfo)\(visitedMarker)"
+                // Generate appropriate test text using fixture system
+                let (testText, source) = try await generateTestTextFor(element: element, screenType: screenType)
+                let description = "Type \"\(testText)\" into \(elementId)\(valueInfo)\(visitedMarker)"
+
+                // Log value source for debugging
+                if case .fixtureExact = source {
+                    print("  💎 Using fixture value for '\(elementId)': \(testText)")
+                }
 
                 choices.append(ActionChoice(
                     number: choiceNumber,
                     action: "type",
                     targetElement: elementId,
-                    textToType: "test@example.com",
+                    textToType: testText,
                     description: description,
                     priority: adjustedPriority,
                     intent: element.intent?.rawValue
@@ -1198,8 +1218,12 @@ public class AICrawler {
             guard let target = targetElement else {
                 throw CrawlerError.invalidDecision
             }
-            // Generate appropriate test text based on field name
-            let testText = generateTestTextFor(fieldId: target)
+            // Find element in hierarchy to pass to resolver
+            let element = context.elements.first(where: { $0.id == target || $0.label == target })
+                ?? MinimalElement(type: .input, id: target, label: nil, interactive: true, children: [])
+
+            // Generate appropriate test text using fixture system
+            let (testText, _) = try await generateTestTextFor(element: element, screenType: context.screenType)
             return ExplorationDecision(
                 action: "type",
                 targetElement: target,
@@ -1238,8 +1262,31 @@ public class AICrawler {
         }
     }
 
-    /// Generate appropriate test text for a given field identifier
-    private func generateTestTextFor(fieldId: String) -> String {
+    /// Generate appropriate test text for a given element using fixture system
+    /// - Parameters:
+    ///   - element: The UI element to generate a value for
+    ///   - screenType: Optional screen type for context-aware matching
+    /// - Returns: Tuple of (value, source) indicating the generated value and its origin
+    private func generateTestTextFor(
+        element: MinimalElement,
+        screenType: ScreenType? = nil
+    ) async throws -> (value: String, source: ValueSource) {
+        // Initialize resolver if needed
+        if fixtureResolver == nil {
+            fixtureResolver = FixtureResolver(fixture: nil)
+        }
+
+        guard let resolver = fixtureResolver else {
+            // Fallback to legacy behavior (should never happen)
+            let fallbackValue = generateLegacyTestText(fieldId: element.id ?? element.label ?? "")
+            return (fallbackValue, .fallback)
+        }
+
+        return try await resolver.resolve(element: element, screenType: screenType)
+    }
+
+    /// Legacy fallback for test text generation (preserves existing behavior)
+    private func generateLegacyTestText(fieldId: String) -> String {
         let lowercased = fieldId.lowercased()
 
         if lowercased.contains("email") {
