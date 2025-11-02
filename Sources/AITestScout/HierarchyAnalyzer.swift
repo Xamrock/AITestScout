@@ -37,40 +37,37 @@ private struct PrioritizedElement: Comparable {
     }
 }
 
-/// Cached XCUIElement properties to minimize redundant queries
-/// Each XCUIElement property access triggers a separate XCUITest query,
-/// so we capture all properties in one pass to reduce query volume by ~80%
-private struct CachedElement {
-    let element: XCUIElement
+/// Snapshot-based element wrapper for zero-query property access
+/// XCUIElementSnapshot captures ALL element state in a single query,
+/// then all property accesses are free (no additional XCTest queries)
+private struct SnapshotElement {
+    let snapshot: XCUIElementSnapshot
     let identifier: String
     let label: String
     let elementType: XCUIElement.ElementType
-    let exists: Bool
     let value: Any?
     let isEnabled: Bool
     let frame: CGRect
+    let children: [XCUIElementSnapshot]
 
     @MainActor
-    init?(from element: XCUIElement) {
-        // First check if element exists - if not, return nil immediately
-        guard element.exists else { return nil }
+    init?(from snapshot: XCUIElementSnapshot) {
+        self.snapshot = snapshot
 
-        self.element = element
-        self.exists = true
-
-        // Capture all properties in one pass
-        // XCTest can fail with "Failed to get matching snapshot" if element becomes stale
-        self.identifier = element.identifier
-        self.label = element.label
-        self.elementType = element.elementType
-        self.value = element.value
-        self.isEnabled = element.isEnabled
-        self.frame = element.frame
+        // All property accesses from snapshot are FREE - no XCTest queries!
+        self.identifier = snapshot.identifier
+        self.label = snapshot.label
+        self.elementType = snapshot.elementType
+        self.value = snapshot.value
+        self.isEnabled = snapshot.isEnabled
+        self.frame = snapshot.frame
+        self.children = snapshot.children
 
         // Validate frame is finite (sometimes XCTest returns NaN/Inf values)
         guard self.frame.isFinite else { return nil }
     }
 }
+
 
 /// Analyzes XCUITest element hierarchies and produces compressed, AI-friendly output
 @MainActor
@@ -103,6 +100,10 @@ public class HierarchyAnalyzer {
     /// Element contexts captured during hierarchy analysis (for LLM export)
     /// Keyed by element identifier: "type|id|label"
     nonisolated(unsafe) private var elementContextMap: [String: ElementContext] = [:]
+
+    /// Snapshot cache for context capture (avoids re-querying elements)
+    /// Maps element key to its snapshot for efficient context capture
+    nonisolated(unsafe) private var snapshotCache: [String: XCUIElementSnapshot] = [:]
 
     /// Public accessor for captured element contexts
     public var capturedElementContexts: [String: ElementContext] {
@@ -169,7 +170,7 @@ public class HierarchyAnalyzer {
 
         // Apply compression/prioritization (reduce to top 50 for AI)
         // Also captures detailed context for top 50 elements only (optimization)
-        let compressedElements = compressElements(allElements, app: app)
+        let compressedElements = compressElements(allElements)
 
         // Detect screen type using semantic analysis
         let screenType = useSemanticAnalysis ? detectScreenType(from: compressedElements) : nil
@@ -213,7 +214,8 @@ public class HierarchyAnalyzer {
         return element.priority ?? 0
     }
 
-    /// Captures ALL elements from the XCUIApplication (no compression)
+    /// Captures ALL elements from the XCUIApplication using snapshot (no compression)
+    /// OPTIMIZED: Uses XCUIElementSnapshot for 1 query instead of ~2,700 queries
     /// - Parameter app: The XCUIApplication to analyze
     /// - Returns: Array of ALL captured MinimalElement representations
     @MainActor
@@ -221,94 +223,72 @@ public class HierarchyAnalyzer {
         var prioritizedElements: [PrioritizedElement] = []
         var seenElements = Set<String>()  // O(1) duplicate tracking
 
-        // Detect if keyboard is present
+        // PERFORMANCE OPTIMIZATION: Capture entire hierarchy in ONE query
+        // Previously: ~2,700 XCTest queries (300 elements × 9 properties)
+        // Now: 1 XCTest query for ENTIRE hierarchy
+        guard let rootSnapshot = try? app.snapshot() else {
+            // Snapshot failed - return empty array
+            return []
+        }
+
+        // Detect if keyboard is present (still need this check before snapshot)
         let keyboardPresent = excludeKeyboard && app.keyboards.firstMatch.exists
 
-        // Define interactive element types to query (reduces queries by ~80%)
-        let interactiveTypes: [XCUIElement.ElementType] = [
-            .button, .textField, .secureTextField, .searchField,
-            .switch, .toggle, .link, .tab, .tabBar,
-            .slider, .stepper, .picker, .pickerWheel,
-            .segmentedControl, .pageIndicator
-        ]
+        // Recursively traverse snapshot hierarchy (all property accesses are FREE!)
+        func traverse(_ snapshot: XCUIElementSnapshot, depth: Int = 0) {
+            // Create SnapshotElement wrapper for property access
+            guard let snapshotElement = SnapshotElement(from: snapshot) else { return }
 
-        // Phase 1: Collect interactive elements by type (targeted queries)
-        for elementType in interactiveTypes {
-            let elements = app.descendants(matching: elementType)
-            let count = min(elements.count, 20)  // Max 20 per type to limit queries
+            // Skip system UI elements
+            guard !categorizer.shouldSkip(snapshotElement.elementType) else { return }
 
-            for i in 0..<count {
-                let element = elements.element(boundBy: i)
+            // Skip keyboard elements
+            if excludeKeyboard && keyboardPresent && isKeyboardElement(snapshotElement) {
+                return
+            }
 
-                // Cache element properties in one pass to minimize XCUITest queries
-                // Skip if caching fails (element became stale or doesn't exist)
-                guard let cached = CachedElement(from: element) else { continue }
+            // Create minimal element
+            let minimalElement = createMinimalElement(from: snapshotElement)
 
-                // Skip system UI elements
-                guard !categorizer.shouldSkip(elementType) else { continue }
+            // Check if element should be included in results
+            // IMPORTANT: We check inclusion but DON'T return early!
+            // Container elements like .application and .window won't be included,
+            // but we still need to traverse their children to find actual UI elements
+            let includeThisElement = shouldInclude(minimalElement)
 
-                // Skip keyboard elements
-                if excludeKeyboard && keyboardPresent && isKeyboardElement(cached) {
-                    continue
-                }
-
-                // Create minimal element and calculate priority
-                let minimalElement = createMinimalElement(from: cached)
-
-                // Only include if it has meaningful content
-                guard shouldInclude(minimalElement) else { continue }
-
-                // Track element to prevent duplicates in Phase 2
+            if includeThisElement {
+                // Check if element already exists (O(1) lookup)
                 let key = elementKey(for: minimalElement)
-                seenElements.insert(key)
 
-                let priority = calculatePriority(for: minimalElement)
-                let semanticPriority = getSemanticPriority(for: minimalElement)
+                if !seenElements.contains(key) {
+                    seenElements.insert(key)
 
-                prioritizedElements.append(PrioritizedElement(
-                    element: minimalElement,
-                    priority: priority,
-                    semanticPriority: semanticPriority
-                ))
+                    // Cache snapshot for later context capture (if enabled)
+                    if captureElementContext {
+                        snapshotCache[key] = snapshot
+                    }
+
+                    // Calculate priority for sorting
+                    // NO LIMITS during traversal - we collect all elements and let
+                    // downstream prioritization/compression handle selection
+                    let priority = calculatePriority(for: minimalElement)
+                    let semanticPriority = getSemanticPriority(for: minimalElement)
+
+                    prioritizedElements.append(PrioritizedElement(
+                        element: minimalElement,
+                        priority: priority,
+                        semanticPriority: semanticPriority
+                    ))
+                }
+            }
+
+            // Recursively traverse children (still FREE - no additional queries!)
+            for child in snapshotElement.children {
+                traverse(child, depth: depth + 1)
             }
         }
 
-        // Phase 2: Backfill with important non-interactive elements
-        // These provide context (e.g., screen titles, important labels with IDs)
-        let identifiedElements = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier != ''"))
-        let idCount = min(identifiedElements.count, 30)  // Limit Phase 2 to 30 elements for performance
-
-        for i in 0..<idCount {
-            let element = identifiedElements.element(boundBy: i)
-
-            // Cache element properties in one pass to minimize XCUITest queries
-            // Skip if caching fails (element became stale or doesn't exist)
-            guard let cached = CachedElement(from: element) else { continue }
-            guard !categorizer.shouldSkip(cached.elementType) else { continue }
-
-            if excludeKeyboard && keyboardPresent && isKeyboardElement(cached) {
-                continue
-            }
-
-            let minimalElement = createMinimalElement(from: cached)
-
-            guard shouldInclude(minimalElement) else { continue }
-
-            // Check if element already exists (O(1) lookup)
-            let key = elementKey(for: minimalElement)
-            guard !seenElements.contains(key) else { continue }
-            seenElements.insert(key)
-
-            let priority = calculatePriority(for: minimalElement)
-            let semanticPriority = getSemanticPriority(for: minimalElement)
-
-            prioritizedElements.append(PrioritizedElement(
-                element: minimalElement,
-                priority: priority,
-                semanticPriority: semanticPriority
-            ))
-        }
+        traverse(rootSnapshot)
 
         // Return all elements sorted by priority (highest first)
         let allElements = prioritizedElements
@@ -319,22 +299,22 @@ public class HierarchyAnalyzer {
     }
 
     /// Compresses elements to top 50 for AI consumption and captures detailed context
-    /// - Parameters:
-    ///   - allElements: All captured elements
-    ///   - app: The XCUIApplication to query for context capture
+    /// - Parameter allElements: All captured elements
     /// - Returns: Top 50 elements by priority
-    private func compressElements(_ allElements: [MinimalElement], app: XCUIApplication) -> [MinimalElement] {
+    private func compressElements(_ allElements: [MinimalElement]) -> [MinimalElement] {
         let targetCount = 50  // Optimized for AI token efficiency
         let topElements = Array(allElements.prefix(targetCount))
 
-        // Capture detailed context for top 50 elements only (major optimization!)
-        // This reduces context capture from ~300 elements to just 50
-        // Skip entirely if captureElementContext is false (saves ~400-500 queries)
+        // Capture detailed context for top 50 elements only using cached snapshots
+        // OPTIMIZED: Uses snapshotCache instead of re-querying (0 additional queries!)
+        // Previously: ~400-500 XCTest queries for context capture
+        // Now: 0 queries - all data already in snapshot cache
         if captureElementContext {
             for (index, element) in topElements.enumerated() {
-                // Re-query the element from the app for context capture
-                if let xcuiElement = findElementForContext(element, in: app) {
-                    _ = captureElementContext(from: xcuiElement, minimalElement: element, index: index)
+                let key = elementKey(for: element)
+                // Use cached snapshot instead of re-querying
+                if let snapshot = snapshotCache[key] {
+                    _ = captureElementContext(from: snapshot, minimalElement: element, index: index)
                 }
             }
         }
@@ -342,39 +322,14 @@ public class HierarchyAnalyzer {
         return topElements
     }
 
-    /// Finds the XCUIElement for a MinimalElement to capture detailed context
-    /// - Parameters:
-    ///   - minimalElement: The MinimalElement to find
-    ///   - app: The XCUIApplication to search
-    /// - Returns: The matching XCUIElement if found
-    private func findElementForContext(_ minimalElement: MinimalElement, in app: XCUIApplication) -> XCUIElement? {
-        // Try to find by identifier first (most reliable)
-        if let id = minimalElement.id, !id.isEmpty {
-            let element = app.descendants(matching: .any).matching(identifier: id).firstMatch
-            if element.exists {
-                return element
-            }
-        }
 
-        // Fallback to label if no identifier
-        if let label = minimalElement.label, !label.isEmpty {
-            let element = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
-            if element.exists {
-                return element
-            }
-        }
-
-        // Element not found - this is okay, context will just not be captured
-        return nil
-    }
-
-    /// Checks if an element is part of the keyboard hierarchy
-    /// - Parameter cached: The cached element to check
+    /// Checks if an element is part of the keyboard hierarchy (SnapshotElement version)
+    /// - Parameter snapshot: The snapshot element to check
     /// - Returns: True if the element is part of the keyboard
     @MainActor
-    private func isKeyboardElement(_ cached: CachedElement) -> Bool {
+    private func isKeyboardElement(_ snapshot: SnapshotElement) -> Bool {
         // Check if element identifier contains keyboard-related strings
-        let identifier = cached.identifier.lowercased()
+        let identifier = snapshot.identifier.lowercased()
         let keyboardIdentifiers = ["keyboard", "autocorrection", "prediction", "emoji"]
 
         for keyboardId in keyboardIdentifiers {
@@ -384,7 +339,7 @@ public class HierarchyAnalyzer {
         }
 
         // Check if element label suggests it's a keyboard key
-        let label = cached.label.lowercased()
+        let label = snapshot.label.lowercased()
         if label.count == 1 {
             // Single character labels are likely keyboard keys
             return true
@@ -402,20 +357,21 @@ public class HierarchyAnalyzer {
         return false
     }
 
-    /// Creates a MinimalElement from cached element properties
-    /// - Parameter cached: The cached element properties
+
+    /// Creates a MinimalElement from snapshot element properties (OPTIMIZED)
+    /// - Parameter snapshot: The snapshot element properties
     /// - Returns: A MinimalElement representation
     @MainActor
-    private func createMinimalElement(from cached: CachedElement) -> MinimalElement {
-        let category = categorizer.categorize(cached.elementType)
+    private func createMinimalElement(from snapshot: SnapshotElement) -> MinimalElement {
+        let category = categorizer.categorize(snapshot.elementType)
 
         // Capture current value for interactive elements (helps AI understand state)
         var value: String? = nil
         if category.interactive {
-            // Get value from cached.value (for inputs, toggles, sliders, etc.)
-            if let elementValue = cached.value as? String, !elementValue.isEmpty {
+            // Get value from snapshot.value (for inputs, toggles, sliders, etc.)
+            if let elementValue = snapshot.value as? String, !elementValue.isEmpty {
                 value = elementValue
-            } else if let elementValue = cached.value as? NSNumber {
+            } else if let elementValue = snapshot.value as? NSNumber {
                 // For toggles (0/1) and sliders (numeric values)
                 value = elementValue.stringValue
             }
@@ -429,8 +385,8 @@ public class HierarchyAnalyzer {
         var priority: Int? = nil
 
         if useSemanticAnalysis, let analyzer = semanticAnalyzer {
-            let id = cached.identifier.isEmpty ? nil : cached.identifier
-            let label = cached.label.isEmpty ? nil : cached.label
+            let id = snapshot.identifier.isEmpty ? nil : snapshot.identifier
+            let label = snapshot.label.isEmpty ? nil : snapshot.label
 
             let detectedIntent = analyzer.detectIntent(label: label, identifier: id)
             intent = detectedIntent == .neutral ? nil : detectedIntent
@@ -449,8 +405,8 @@ public class HierarchyAnalyzer {
 
         return MinimalElement(
             type: elementType,
-            id: cached.identifier.isEmpty ? nil : cached.identifier,
-            label: cached.label.isEmpty ? nil : cached.label,
+            id: snapshot.identifier.isEmpty ? nil : snapshot.identifier,
+            label: snapshot.label.isEmpty ? nil : snapshot.label,
             interactive: category.interactive,
             value: value,
             intent: intent,
@@ -458,6 +414,7 @@ public class HierarchyAnalyzer {
             children: []
         )
     }
+
 
     /// Calculates priority for an element based on its properties
     /// - Parameter element: The MinimalElement to evaluate
@@ -525,46 +482,40 @@ public class HierarchyAnalyzer {
         return true
     }
 
-    /// Captures detailed element context for LLM test generation
+    /// Captures detailed element context from snapshot (OPTIMIZED - zero queries)
     /// - Parameters:
-    ///   - element: The XCUIElement to capture context from
+    ///   - snapshot: The XCUIElementSnapshot to capture context from
     ///   - minimalElement: The corresponding MinimalElement
     ///   - index: Element index among siblings of same type
     /// - Returns: ElementContext with queries, frame, state, etc.
     @MainActor
     private func captureElementContext(
-        from element: XCUIElement,
+        from snapshot: XCUIElementSnapshot,
         minimalElement: MinimalElement,
         index: Int
     ) -> ElementContext {
-        // Build query strategies
+        // Build query strategies (all data from snapshot - no queries!)
         let queries = QueryBuilder.buildQueries(
-            elementType: element.elementType,
+            elementType: snapshot.elementType,
             id: minimalElement.id,
             label: minimalElement.label,
             index: index
         )
 
-        // Capture accessibility traits
-        let traits = captureAccessibilityTraits(from: element)
+        // Capture accessibility traits from snapshot
+        let traits = captureAccessibilityTraits(from: snapshot)
 
-        // Skip expensive isHittable check during hierarchy capture
-        // This check triggers 3-5 XCTest queries per element and is only needed
-        // during action execution (ActionExecutor already checks it)
-        // Default to false for safety - actual hittability is verified before tap
-        let isHittable = false
-
-        // Create context
+        // Create context using snapshot properties (all FREE!)
         let context = ElementContext(
-            xcuiElementType: String(describing: element.elementType),
-            frame: element.frame,
-            isEnabled: element.isEnabled,
-            isVisible: element.exists,  // Simplified without isHittable dependency
-            isHittable: isHittable,
-            hasFocus: false, // XCUIElement doesn't expose focus state directly
+            xcuiElementType: String(describing: snapshot.elementType),
+            frame: snapshot.frame,
+            isEnabled: snapshot.isEnabled,
+            isVisible: true,  // Snapshot only exists if element was visible
+            isHittable: false,  // Conservative default - verified during action execution
+            hasFocus: false,  // XCUIElementSnapshot doesn't expose hasFocus in public API
             queries: queries,
             accessibilityTraits: traits,
-            accessibilityHint: nil // XCUIElement doesn't expose hint directly
+            accessibilityHint: nil  // XCUIElementSnapshot doesn't expose hint
         )
 
         // Store in map
@@ -577,16 +528,16 @@ public class HierarchyAnalyzer {
         return context
     }
 
-    /// Captures accessibility traits from an element
-    /// - Parameter element: The XCUIElement
+
+    /// Captures accessibility traits from snapshot (OPTIMIZED)
+    /// - Parameter snapshot: The XCUIElementSnapshot
     /// - Returns: Array of trait strings
     @MainActor
-    private func captureAccessibilityTraits(from element: XCUIElement) -> [String]? {
-        // XCUIElement doesn't expose traits directly, so we infer from element type
-        // This is a simplified implementation
+    private func captureAccessibilityTraits(from snapshot: XCUIElementSnapshot) -> [String]? {
+        // Infer traits from element type (snapshot provides elementType for free)
         var traits: [String] = []
 
-        switch element.elementType {
+        switch snapshot.elementType {
         case .button:
             traits.append("button")
         case .textField, .secureTextField, .searchField:
@@ -604,8 +555,10 @@ public class HierarchyAnalyzer {
         return traits.isEmpty ? nil : traits
     }
 
+
     /// Method to clear captured contexts (useful for memory management in long sessions)
     public func clearCapturedContexts() {
         elementContextMap.removeAll()
+        snapshotCache.removeAll()
     }
 }
