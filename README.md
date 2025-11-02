@@ -83,7 +83,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/xamrock/ai-test-scout", from: "0.2.2")
+    .package(url: "https://github.com/Xamrock/AITestScout", from: "0.4.0")
 ]
 ```
 
@@ -91,6 +91,18 @@ Or in Xcode: **File → Add Package Dependencies**
 
 **Requirements:**
 - iOS 26+ (for AI exploration with Apple Intelligence)
+
+### Quick Start with CLI
+
+If you prefer not to add the package directly, use the [Xamrock CLI](https://github.com/Xamrock/CLI) to generate the test file:
+
+```bash
+brew install xamrock/tap/xamrock
+xamrock explore --app com.yourcompany.YourApp
+cp scout-results/ScoutCLIExploration.swift YourAppUITests/
+```
+
+Then run the test in Xcode (⌘U) and view results in `scout-results/`.
 
 ---
 
