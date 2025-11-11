@@ -96,7 +96,9 @@ public class ExplorationPath: Codable {
             interactiveElementCount: lastStep.interactiveElementCount,
             reasoning: reason ?? lastStep.reasoning,
             confidence: lastStep.confidence,
-            wasSuccessful: false
+            wasSuccessful: false,
+            aiPrompt: lastStep.aiPrompt,
+            aiResponse: lastStep.aiResponse
         )
 
         return updateLastStep(updatedStep)

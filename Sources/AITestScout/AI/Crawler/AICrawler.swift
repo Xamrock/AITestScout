@@ -73,6 +73,13 @@ public class AICrawler {
         self.fixtureResolver = FixtureResolver(fixture: fixture)
     }
 
+    /// AI decision result containing the decision and AI interaction data
+    public struct DecisionResult {
+        public let decision: ExplorationDecision
+        public let aiPrompt: String
+        public let aiResponse: String
+    }
+
     /// Ask the AI to decide the next action using multiple choice (more reliable)
     /// - Parameters:
     ///   - hierarchy: The captured screen hierarchy
@@ -80,7 +87,7 @@ public class AICrawler {
     ///   - goal: The exploration goal
     ///   - previousAction: The last action taken
     ///   - recordStep: Whether to automatically record this decision in the exploration path
-    /// - Returns: The AI's decision about what to do next
+    /// - Returns: DecisionResult containing the decision, AI prompt, and AI response
     /// - Throws: Various errors if the AI cannot make a decision
     public func decideNextActionWithChoices(
         hierarchy: CompressedHierarchy,
@@ -88,7 +95,7 @@ public class AICrawler {
         goal: String? = nil,
         previousAction: String? = nil,
         recordStep: Bool = true
-    ) async throws -> ExplorationDecision {
+    ) async throws -> DecisionResult {
         // Record screen visit in navigation graph
         let isNewScreen = recordScreenVisit(hierarchy)
 
@@ -114,13 +121,21 @@ public class AICrawler {
                     successProbability: SuccessProbability(value: 0.8, reasoning: "High confidence that we should move on to avoid loops")
                 )
 
+                let aiPrompt = "N/A - Stuck detection triggered"
+                let aiResponse = #"{"reason": "Stuck on screen after \#(actionsOnCurrentScreen.count) attempts"}"#
+
                 if recordStep, let path = explorationPath {
-                    let step = ExplorationStep.from(decision: decision, hierarchy: hierarchy)
+                    let step = ExplorationStep.from(
+                        decision: decision,
+                        hierarchy: hierarchy,
+                        aiPrompt: aiPrompt,
+                        aiResponse: aiResponse
+                    )
                     path.addStep(step)
                 }
 
                 actionsOnCurrentScreen = [] // Reset for next screen
-                return decision
+                return DecisionResult(decision: decision, aiPrompt: aiPrompt, aiResponse: aiResponse)
             }
         }
 
@@ -134,12 +149,20 @@ public class AICrawler {
                 successProbability: SuccessProbability(value: 1.0, reasoning: "Certain that exploration is complete with no elements")
             )
 
+            let aiPrompt = "N/A - Empty hierarchy detected"
+            let aiResponse = #"{"reason": "No interactive elements found on screen"}"#
+
             if recordStep, let path = explorationPath {
-                let step = ExplorationStep.from(decision: decision, hierarchy: hierarchy)
+                let step = ExplorationStep.from(
+                    decision: decision,
+                    hierarchy: hierarchy,
+                    aiPrompt: aiPrompt,
+                    aiResponse: aiResponse
+                )
                 path.addStep(step)
             }
 
-            return decision
+            return DecisionResult(decision: decision, aiPrompt: aiPrompt, aiResponse: aiResponse)
         }
 
         // Use exploration path if available
@@ -159,12 +182,20 @@ public class AICrawler {
                 successProbability: SuccessProbability(value: 1.0, reasoning: "Certain there are no valid actions")
             )
 
+            let aiPrompt = "N/A - No valid choices available"
+            let aiResponse = #"{"reason": "No interactive elements qualified as valid choices"}"#
+
             if recordStep, let path = explorationPath {
-                let step = ExplorationStep.from(decision: decision, hierarchy: hierarchy)
+                let step = ExplorationStep.from(
+                    decision: decision,
+                    hierarchy: hierarchy,
+                    aiPrompt: aiPrompt,
+                    aiResponse: aiResponse
+                )
                 path.addStep(step)
             }
 
-            return decision
+            return DecisionResult(decision: decision, aiPrompt: aiPrompt, aiResponse: aiResponse)
         }
 
         // Notify delegate that decision is about to be made
@@ -181,8 +212,8 @@ public class AICrawler {
             screenType: hierarchy.screenType?.rawValue
         )
 
-        // Get AI choice with retry logic
-        let choice = try await respondWithChoice(prompt: prompt, validChoiceCount: choices.count)
+        // Get AI choice with retry logic (returns tuple with prompt and response)
+        let (choice, aiPrompt, aiResponse) = try await respondWithChoice(prompt: prompt, validChoiceCount: choices.count)
 
         // Convert choice to decision
         let decision = try convertChoiceToDecision(choice: choice, choices: choices)
@@ -193,16 +224,20 @@ public class AICrawler {
         // Track this action attempt
         if let targetElement = decision.targetElement {
             actionsOnCurrentScreen.append(targetElement)
-            print("🎯 Action attempt #\(actionsOnCurrentScreen.count) on this screen: \(decision.action) → \(targetElement)")
         }
 
         // Record step in exploration path if enabled
         if recordStep, let path = explorationPath {
-            let step = ExplorationStep.from(decision: decision, hierarchy: hierarchy)
+            let step = ExplorationStep.from(
+                decision: decision,
+                hierarchy: hierarchy,
+                aiPrompt: aiPrompt,
+                aiResponse: aiResponse
+            )
             path.addStep(step)
         }
 
-        return decision
+        return DecisionResult(decision: decision, aiPrompt: aiPrompt, aiResponse: aiResponse)
     }
 
     /// Ask the AI to decide the next action based on the current screen hierarchy
@@ -222,13 +257,14 @@ public class AICrawler {
         recordStep: Bool = true
     ) async throws -> ExplorationDecision {
         // Use the more reliable multiple choice approach
-        return try await decideNextActionWithChoices(
+        let result = try await decideNextActionWithChoices(
             hierarchy: hierarchy,
             visited: visited,
             goal: goal,
             previousAction: previousAction,
             recordStep: recordStep
         )
+        return result.decision
     }
 
     /// Ask the AI to decide the next action with enhanced success probability tracking
@@ -271,13 +307,14 @@ public class AICrawler {
     ) async throws -> ExplorationDecision {
         // For now, use the existing decision logic and upgrade to enhanced
         // In a future phase, we can add specialized prompts for enhanced decisions
-        let basicDecision = try await decideNextActionWithChoices(
+        let result = try await decideNextActionWithChoices(
             hierarchy: hierarchy,
             visited: visited,
             goal: goal,
             previousAction: previousAction,
             recordStep: recordStep
         )
+        let basicDecision = result.decision
 
         // Convert basic decision to enhanced with inferred probability
         let probability = inferSuccessProbability(from: basicDecision, hierarchy: hierarchy)
@@ -657,17 +694,18 @@ public class AICrawler {
     }
 
     /// Respond to prompt with multiple choice selection
-    private func respondWithChoice(prompt: String, validChoiceCount: Int, maxRetries: Int = 2) async throws -> CrawlerChoice {
+    /// Returns tuple of (choice, prompt, responseJSON)
+    private func respondWithChoice(prompt: String, validChoiceCount: Int, maxRetries: Int = 2) async throws -> (choice: CrawlerChoice, prompt: String, responseJSON: String) {
         var lastError: Error?
 
         // Log the prompt being sent
-        print("\n" + String(repeating: "=", count: 80))
+        print("\n" + String(repeating: "=", count: 40))
         print("📝 PROMPT SENT TO AI (attempt 1/\(maxRetries)):")
-        print(String(repeating: "=", count: 80))
+        print(String(repeating: "=", count: 40))
         print(prompt)
-        print(String(repeating: "=", count: 80))
+        print(String(repeating: "=", count: 40))
         print("📊 Prompt stats: \(prompt.count) chars (~\(prompt.count/4) tokens)")
-        print(String(repeating: "=", count: 80) + "\n")
+        print(String(repeating: "=", count: 40) + "\n")
 
         for attempt in 0..<maxRetries {
             do {
@@ -684,16 +722,34 @@ public class AICrawler {
                     continue
                 }
 
-                return choice
+                // Serialize response to JSON
+                let encoder = JSONEncoder()
+                let responseData = try encoder.encode(choice)
+                let responseJSON = String(data: responseData, encoding: .utf8) ?? "{}"
+
+                // Log the AI response
+                print("\n" + String(repeating: "=", count: 40))
+                print("🤖 AI RESPONSE RECEIVED:")
+                print(String(repeating: "=", count: 40))
+                print("Choice: \(choice.choice)")
+                print("Reasoning: \(choice.reasoning)")
+                print("Confidence: \(choice.confidence)%")
+                print(String(repeating: "=", count: 40) + "\n")
+
+                return (choice, prompt, responseJSON)
             } catch let error as LanguageModelSession.GenerationError {
                 if case .exceededContextWindowSize = error {
                     print("⚠️  Context window exceeded - this shouldn't happen with multiple choice")
                     // Fallback to "done" choice
-                    return CrawlerChoice(
+                    let fallbackChoice = CrawlerChoice(
                         choice: validChoiceCount, // Last choice is always "done"
                         reasoning: "Context window exceeded, marking as done",
                         confidence: 0
                     )
+                    let encoder = JSONEncoder()
+                    let fallbackData = try encoder.encode(fallbackChoice)
+                    let fallbackJSON = String(data: fallbackData, encoding: .utf8) ?? "{}"
+                    return (fallbackChoice, prompt, fallbackJSON)
                 }
                 lastError = error
 
@@ -1301,27 +1357,6 @@ public class AICrawler {
             return "test query"
         } else {
             return "test input"
-        }
-    }
-}
-
-/// Errors that can occur during AI crawling
-public enum CrawlerError: Error, LocalizedError {
-    case modelUnavailable
-    case invalidHierarchy
-    case guardRailsBlocked
-    case invalidDecision
-
-    public var errorDescription: String? {
-        switch self {
-        case .modelUnavailable:
-            return "Foundation Models not available. Requires iOS 26+ and Apple Silicon."
-        case .invalidHierarchy:
-            return "Could not convert hierarchy to valid JSON."
-        case .guardRailsBlocked:
-            return "AI guardrails blocked the request."
-        case .invalidDecision:
-            return "AI returned an invalid decision."
         }
     }
 }

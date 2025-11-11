@@ -357,4 +357,106 @@ extension ExplorationPath {
             .replacingOccurrences(of: "\r", with: "\\r")
             .replacingOccurrences(of: "\t", with: "\\t")
     }
+
+    // MARK: - Crash Test Generation
+
+    /// Generate a UI test that reproduces an app crash
+    /// This creates a dedicated test to document and verify crash-causing interactions
+    public func generateCrashTest(for crashStep: ExplorationStep, className: String = "CrashReproductionTests") -> String {
+        let reproPath = reproductionPath(for: crashStep)
+        let testName = sanitizeTestName(crashStep.targetElement ?? "Crash")
+
+        var test = """
+        import XCTest
+
+        /// ⚠️  CRASH REPRODUCTION TEST
+        /// This test reproduces an app crash discovered during exploration.
+        /// https://github.com/xamrock/ai-test-scout
+        ///
+        /// Crash Details:
+        /// - Action: \(crashStep.action)
+        /// - Target: \(crashStep.targetElement ?? "Unknown")
+        /// - Timestamp: \(crashStep.timestamp)
+        /// - Screen: \(crashStep.screenDescription)
+        /// - Steps to reproduce: \(reproPath.count)
+        ///
+        /// Session: \(sessionId)
+        /// Goal: \(goal)
+        ///
+        /// ℹ️  HOW TO USE THIS TEST:
+        /// This test documents a crash. When you run it:
+        /// - If crash still exists: Test will FAIL (expected until crash is fixed)
+        /// - If crash is fixed: Test will PASS (indicating crash is resolved)
+
+        class \(className): XCTestCase {
+            var app: XCUIApplication!
+
+            override func setUp() {
+                super.setUp()
+                continueAfterFailure = false  // Fail immediately on crash
+                app = XCUIApplication()
+            }
+
+            // MARK: - Crash Reproduction
+
+            /// Reproduces crash: \(crashStep.action) on '\(crashStep.targetElement ?? "element")'
+            ///
+            /// WARNING: This test is expected to fail until the crash is fixed.
+            /// The crash manifests as a 60+ second timeout followed by test failure.
+            func testCrashReproduction_\(testName)() throws {
+                app.launch()
+
+        """
+
+        // Add all steps including the crash-causing one
+        for (index, step) in reproPath.enumerated() {
+            let isCrashStep = step.id == crashStep.id
+            test += "        // Step \(index + 1): \(step.reasoning)\n"
+
+            if isCrashStep {
+                test += "        // ⚠️  THIS STEP CAUSES THE CRASH\n"
+                test += "        // Expected behavior: App crashes, next assertion fails\n"
+                test += "        // When fixed: App responds normally, test passes\n"
+            }
+
+            test += generateStepCode(step, stepNumber: index + 1, indent: "        ", expectFailure: false)
+            test += "\n"
+
+            // Add crash verification after the crash-causing step
+            if isCrashStep {
+                test += "        \n"
+                test += "        // Verify app is still responsive after the tap\n"
+                test += "        // If the app crashed, this will timeout trying to query the UI\n"
+                test += "        sleep(1)  // Give app a moment to crash if it's going to\n"
+                test += "        \n"
+                test += "        // Try to find any UI element - this proves the app is still running\n"
+                test += "        let anyElement = app.buttons.firstMatch\n"
+                test += "        let isResponsive = anyElement.waitForExistence(timeout: 3)\n"
+                test += "        \n"
+                test += "        // If this assertion fails with a timeout, the app crashed\n"
+                test += "        XCTAssertTrue(isResponsive, \"\"\"\n"
+                test += "            App crashed after tapping '\(step.targetElement ?? "element")'.\n"
+                test += "            The app became unresponsive and could not query the UI hierarchy.\n"
+                test += "            Once the crash is fixed, this test will pass.\n"
+                test += "            \"\"\")\n"
+                test += "\n"
+            }
+        }
+
+        test += """
+            }
+        }
+        """
+
+        return test
+    }
+
+    /// Save crash reproduction test to a Swift file
+    public func saveCrashTest(for crashStep: ExplorationStep, to url: URL, className: String = "CrashReproductionTests") throws {
+        let test = generateCrashTest(for: crashStep, className: className)
+        try test.write(to: url, atomically: true, encoding: .utf8)
+        print("💥 Crash test saved to: \(url.path)")
+        print("   - Crash step: \(crashStep.action) on '\(crashStep.targetElement ?? "unknown")'")
+        print("   - Reproduction steps: \(reproductionPath(for: crashStep).count)")
+    }
 }

@@ -42,6 +42,9 @@ public struct ExplorationResult: Sendable {
     /// Timestamp when the exploration started
     public let startTime: Date
 
+    /// Number of app crashes detected during exploration
+    public let crashesDetected: Int
+
     /// Initialize exploration result
     public init(
         screensDiscovered: Int,
@@ -56,7 +59,8 @@ public struct ExplorationResult: Sendable {
         verificationsPassed: Int = 0,
         verificationsFailed: Int = 0,
         retryAttempts: Int = 0,
-        startTime: Date = Date()
+        startTime: Date = Date(),
+        crashesDetected: Int = 0
     ) {
         self.screensDiscovered = screensDiscovered
         self.transitions = transitions
@@ -71,6 +75,7 @@ public struct ExplorationResult: Sendable {
         self.verificationsFailed = verificationsFailed
         self.retryAttempts = retryAttempts
         self.startTime = startTime
+        self.crashesDetected = crashesDetected
     }
 
     // MARK: - Computed Properties
@@ -107,6 +112,11 @@ public struct ExplorationResult: Sendable {
             "   • Success Rate: \(successRatePercent)% (\(successfulActions)/\(totalActions))",
             "   • Failures: \(failedActions)"
         ]
+
+        // Add crash information if any crashes detected
+        if crashesDetected > 0 {
+            lines.append("   • 💥 Crashes: \(crashesDetected)")
+        }
 
         // Add verification stats if any verifications were performed
         if verificationsPerformed > 0 {

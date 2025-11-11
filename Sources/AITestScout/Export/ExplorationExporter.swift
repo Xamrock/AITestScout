@@ -133,6 +133,125 @@ public class ExplorationExporter {
         let (successful, _) = path.successRate
         return Int((Double(successful) / Double(path.steps.count)) * 100)
     }
+
+    // MARK: - Backend Export
+
+    /// Exports exploration data in backend-compatible format
+    /// - Parameters:
+    ///   - explorationPath: The exploration session path
+    ///   - navigationGraph: The navigation graph built during exploration
+    ///   - metadata: Optional metadata with element contexts and environment info
+    /// - Returns: JSON data compatible with Xamrock Backend API
+    /// - Throws: Encoding errors if serialization fails
+    public func exportBackendData(
+        explorationPath: ExplorationPath,
+        navigationGraph: NavigationGraph,
+        metadata: ExplorationMetadata? = nil
+    ) throws -> Data {
+        // Convert steps with sequential numbering
+        let steps = explorationPath.steps.enumerated().map { (index, step) in
+            ExplorationStepData(
+                stepNumber: index + 1,
+                stepId: step.id.uuidString,
+                timestamp: step.timestamp,
+                action: step.action,
+                targetElement: step.targetElement,
+                textTyped: step.textTyped,
+                reasoning: step.reasoning,
+                confidence: step.confidence,
+                wasSuccessful: step.wasSuccessful,
+                didCauseCrash: step.didCauseCrash,
+                wasRetry: step.wasRetry,
+                screenDescription: step.screenDescription,
+                interactiveElementCount: step.interactiveElementCount,
+                elementContext: nil, // TODO: Match from metadata.elementContexts
+                verificationResult: step.verificationResult.map { result in
+                    VerificationResultData(
+                        passed: result.passed,
+                        reason: result.reason
+                    )
+                },
+                screenshotPath: step.screenshotPath,
+                screenshotStorageKey: nil, // Set by backend after upload
+                aiPrompt: step.aiPrompt,
+                aiResponse: step.aiResponse
+            )
+        }
+
+        // Convert navigation graph
+        let stats = navigationGraph.coverageStats()
+        let navGraph = NavigationGraphData(
+            totalScreens: stats.totalScreens,
+            totalTransitions: stats.totalEdges,
+            startNode: navigationGraph.startNode,
+            coveragePercentage: stats.coveragePercentage,
+            screens: [], // TODO: Convert ScreenNode to ScreenNodeData
+            edges: []    // TODO: Convert ScreenEdge to ScreenEdgeData
+        )
+
+        // Generate insights
+        let (successful, failed) = explorationPath.successRate
+        let crashSteps = steps.filter { $0.didCauseCrash }.count
+        let avgConfidence: Double = steps.isEmpty ? 0.0 :
+            Double(steps.map { $0.confidence }.reduce(0, +)) / Double(steps.count)
+
+        let insights = InsightsData(
+            totalSteps: steps.count,
+            successfulSteps: successful,
+            failedSteps: failed,
+            crashSteps: crashSteps,
+            avgConfidence: avgConfidence,
+            topFailureReasons: [], // TODO: Extract from failed steps
+            screenTypeDistribution: [:] // TODO: Extract from navigation graph
+        )
+
+        // Create backend exploration data
+        let backendData = BackendExplorationData(
+            version: "1.0",
+            steps: steps,
+            navigationGraph: navGraph,
+            elementContexts: metadata?.elementContexts ?? [:],
+            insights: insights
+        )
+
+        // Encode to JSON
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(backendData)
+    }
+
+    /// Saves exploration data to a file in backend-compatible format
+    /// - Parameters:
+    ///   - explorationPath: The exploration session path
+    ///   - navigationGraph: The navigation graph
+    ///   - fileURL: File URL to save to (typically exploration.json)
+    ///   - metadata: Optional metadata
+    /// - Throws: Encoding or file writing errors
+    public func saveBackendData(
+        explorationPath: ExplorationPath,
+        navigationGraph: NavigationGraph,
+        to fileURL: URL,
+        metadata: ExplorationMetadata? = nil
+    ) throws {
+        // Generate backend data
+        let data = try exportBackendData(
+            explorationPath: explorationPath,
+            navigationGraph: navigationGraph,
+            metadata: metadata
+        )
+
+        // Create parent directories if needed
+        let parentDir = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: parentDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        // Write to file
+        try data.write(to: fileURL, options: .atomic)
+    }
 }
 
 // MARK: - Export Data Models

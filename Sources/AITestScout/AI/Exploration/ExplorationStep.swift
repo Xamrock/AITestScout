@@ -43,6 +43,15 @@ public struct ExplorationStep: Codable, Equatable {
     /// Stored as relative path for flexibility - works with local files and future backend URLs
     public let screenshotPath: String?
 
+    /// Whether this step caused the app to crash
+    public let didCauseCrash: Bool
+
+    /// The complete prompt sent to the AI for this decision
+    public let aiPrompt: String
+
+    /// The raw AI response received (JSON or structured response)
+    public let aiResponse: String
+
     public init(
         id: UUID = UUID(),
         timestamp: Date = Date(),
@@ -56,7 +65,10 @@ public struct ExplorationStep: Codable, Equatable {
         wasSuccessful: Bool = true,
         verificationResult: VerificationResult? = nil,
         wasRetry: Bool = false,
-        screenshotPath: String? = nil
+        screenshotPath: String? = nil,
+        didCauseCrash: Bool = false,
+        aiPrompt: String = "",
+        aiResponse: String = ""
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -71,6 +83,9 @@ public struct ExplorationStep: Codable, Equatable {
         self.verificationResult = verificationResult
         self.wasRetry = wasRetry
         self.screenshotPath = screenshotPath
+        self.didCauseCrash = didCauseCrash
+        self.aiPrompt = aiPrompt
+        self.aiResponse = aiResponse
     }
 
     /// Creates an ExplorationStep from an ExplorationDecision
@@ -80,7 +95,10 @@ public struct ExplorationStep: Codable, Equatable {
         wasSuccessful: Bool = true,
         verificationResult: VerificationResult? = nil,
         wasRetry: Bool = false,
-        screenshotPath: String? = nil
+        screenshotPath: String? = nil,
+        didCauseCrash: Bool = false,
+        aiPrompt: String,
+        aiResponse: String
     ) -> ExplorationStep {
         // Generate screen description from interactive elements
         let interactiveElements = hierarchy.elements.filter { $0.interactive }
@@ -108,7 +126,10 @@ public struct ExplorationStep: Codable, Equatable {
             wasSuccessful: wasSuccessful,
             verificationResult: verificationResult,
             wasRetry: wasRetry,
-            screenshotPath: screenshotPath
+            screenshotPath: screenshotPath,
+            didCauseCrash: didCauseCrash,
+            aiPrompt: aiPrompt,
+            aiResponse: aiResponse
         )
     }
 

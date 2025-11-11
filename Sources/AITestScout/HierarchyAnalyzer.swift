@@ -151,18 +151,33 @@ public class HierarchyAnalyzer {
         // Notify delegate that capture is beginning
         delegate?.willBeginCapture()
 
-        // Capture screenshot (may log XCTest warnings on timing/frame issues, but won't crash)
-        let screenshotData: Data
-        if app.frame.isEmpty {
-            // App has empty frame - skip screenshot to avoid XCTest error
-            screenshotData = Data()
-        } else {
-            let screenshot = app.screenshot()
-            screenshotData = screenshot.pngRepresentation
+        // CRASH SAFETY: Check if app is running before accessing any properties
+        // Accessing app.frame or other properties when app is not running causes timeout
+        guard app.state != .notRunning && app.state != .unknown else {
+            // App is not running - return empty hierarchy
+            return CompressedHierarchy(elements: [], screenshot: Data(), screenType: nil)
         }
 
-        // Capture ALL elements before compression (for comprehensive tools)
+        // Capture ALL elements FIRST (uses try? app.snapshot() which fails gracefully)
         let allElements = captureAllElementsFromApp(app)
+
+        // If snapshot failed (crash during capture), return empty hierarchy
+        if allElements.isEmpty {
+            // Check if app crashed during snapshot
+            if app.state == .notRunning {
+                return CompressedHierarchy(elements: [], screenshot: Data(), screenType: nil)
+            }
+        }
+
+        // Capture screenshot AFTER successful snapshot (more stable)
+        let screenshotData: Data
+        do {
+            let screenshot = app.screenshot()
+            screenshotData = screenshot.pngRepresentation
+        } catch {
+            // Screenshot failed - use empty data
+            screenshotData = Data()
+        }
 
         // Notify delegate with full data BEFORE compression
         // This allows comprehensive tools to access ALL elements without affecting AI token usage
@@ -230,6 +245,8 @@ public class HierarchyAnalyzer {
             // Snapshot failed - return empty array
             return []
         }
+        
+        print(rootSnapshot)
 
         // Detect if keyboard is present (still need this check before snapshot)
         let keyboardPresent = excludeKeyboard && app.keyboards.firstMatch.exists

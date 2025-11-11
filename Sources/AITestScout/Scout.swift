@@ -68,6 +68,7 @@ public class Scout: XCTestCase, @unchecked Sendable {
     ///     outputDirectory: URL(fileURLWithPath: "./UITests/Generated")
     /// )
     /// ```
+    @discardableResult
     nonisolated public static func explore(
         _ app: XCUIApplication,
         steps: Int = 20,
@@ -94,6 +95,12 @@ public class Scout: XCTestCase, @unchecked Sendable {
     ) throws -> ExplorationResult {
         // Create a temporary test case instance for xcAwait
         let testCase = Scout()
+
+        // CRITICAL: Allow Scout's internal test case to continue after XCUITest failures
+        // This is essential for crash detection - when the app crashes, XCUITest records
+        // errors (timeouts, empty frame), but we need to continue execution to generate
+        // crash reproduction tests. The user's test case settings remain independent.
+        testCase.continueAfterFailure = true
 
         // REUSES: HierarchyAnalyzer (existing component)
         let analyzer = HierarchyAnalyzer()
@@ -154,6 +161,7 @@ public class Scout: XCTestCase, @unchecked Sendable {
                 var retryAttempts = 0
 
                 do {
+                    var crashDetected = false  // Track if crash occurred
                     for stepNumber in 1...config.steps {
                         // 1. REUSES: analyzer.capture() (existing, MainActor-isolated)
                         let beforeHierarchy = analyzer.capture(from: app)
@@ -179,11 +187,14 @@ public class Scout: XCTestCase, @unchecked Sendable {
                         }
 
                         // 2. REUSES: crawler.decideNextActionWithChoices() (existing)
-                        let decision = try await crawler.decideNextActionWithChoices(
+                        let result = try await crawler.decideNextActionWithChoices(
                             hierarchy: beforeHierarchy,
                             goal: config.goal,
                             recordStep: false  // Scout will record after retry loop
                         )
+                        let decision = result.decision
+                        let aiPrompt = result.aiPrompt
+                        let aiResponse = result.aiResponse
 
                         // 3. Check if done
                         if decision.action == "done" {
@@ -206,20 +217,140 @@ public class Scout: XCTestCase, @unchecked Sendable {
                                 // Catch all errors (ActionError and XCUIElement runtime errors)
                                 let errorMessage = (error as? ActionError)?.localizedDescription ?? error.localizedDescription
                                 print("⚠️  Action failed: \(errorMessage)")
+
+                                // Check if app crashed AFTER action execution error
+                                // The error might be due to the app crashing during/after the tap
+                                if app.state == .notRunning {
+                                    print("💥 CRASH DETECTED at step \(stepNumber) (after action error)")
+                                    print("   Action: \(currentDecision.action)")
+                                    print("   Error: \(errorMessage)")
+                                    if let target = currentDecision.targetElement {
+                                        print("   Target: \(target)")
+                                    }
+
+                                    let crashStep = ExplorationStep.from(
+                                        decision: currentDecision,
+                                        hierarchy: beforeHierarchy,
+                                        wasSuccessful: false,
+                                        screenshotPath: screenshotPath,
+                                        didCauseCrash: true,
+                                        aiPrompt: aiPrompt,
+                                        aiResponse: aiResponse
+                                    )
+                                    crawler.explorationPath?.addStep(crashStep)
+
+                                    // Generate crash test IMMEDIATELY when crash is detected
+                                    if config.generateTests,
+                                       let explorationPath = crawler.explorationPath,
+                                       let outputDir = outputDir {
+                                        do {
+                                            let crashTestFileURL = outputDir.appendingPathComponent("CrashReproductionTest.swift")
+                                            try explorationPath.saveCrashTest(for: crashStep, to: crashTestFileURL)
+                                            print("💥 Crash test generated immediately at: \(crashTestFileURL.path)")
+                                        } catch {
+                                            print("⚠️  Failed to save crash test immediately: \(error)")
+                                        }
+                                    }
+
+                                    throw NSError(domain: "AppCrash", code: 1, userInfo: [
+                                        NSLocalizedDescriptionKey: "App crashed at step \(stepNumber)"
+                                    ])
+                                }
+
                                 crawler.markLastStepFailed(reason: errorMessage)
                                 actionSuccessful = false
                                 // Action execution failure - don't verify, break retry loop
                                 break
                             }
 
-                            // 4b. If action executed successfully, wait for UI to settle
+                            // 4b. If action executed successfully, check for crash
+                            // Note: element.tap() includes automatic 60s wait for app to idle
+                            // If a crash happened, we'll be here 60+ seconds after the tap
                             if actionSuccessful {
-                                try await Task.sleep(nanoseconds: 1_000_000_000)
+                                // DEBUG: Log app state
+                                let currentState = app.state
+
+                                // IMMEDIATE crash check (no wait needed - tap already waited)
+                                if currentState == .notRunning {
+
+                                    // Mark this step as crash-causing
+                                    let crashStep = ExplorationStep.from(
+                                        decision: currentDecision,
+                                        hierarchy: beforeHierarchy,
+                                        wasSuccessful: false,
+                                        screenshotPath: screenshotPath,
+                                        didCauseCrash: true,
+                                        aiPrompt: aiPrompt,
+                                        aiResponse: aiResponse
+                                    )
+                                    crawler.explorationPath?.addStep(crashStep)
+
+                                    // Generate crash test IMMEDIATELY when crash is detected
+                                    if config.generateTests,
+                                       let explorationPath = crawler.explorationPath,
+                                       let outputDir = outputDir {
+                                        do {
+                                            let crashTestFileURL = outputDir.appendingPathComponent("CrashReproductionTest.swift")
+                                            try explorationPath.saveCrashTest(for: crashStep, to: crashTestFileURL)
+                                        } catch {
+                                            print("⚠️  Failed to save crash test immediately: \(error)")
+                                        }
+                                    }
+
+                                    // Break out of both retry loop and exploration loop
+                                    // The exploration path has auto-saved, so crash is persisted
+                                    throw NSError(domain: "AppCrash", code: 1, userInfo: [
+                                        NSLocalizedDescriptionKey: "App crashed at step \(stepNumber)"
+                                    ])
+                                }
+
+                                // Small wait for UI to settle (normal case)
+                                try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                             }
 
                             // 4c. Verify action outcome (Phase 3)
                             if config.enableVerification && actionSuccessful {
+                                // NOTE: app.state is unreliable for crash detection
+                                // It often still shows .runningForeground even after crash
+                                // We detect crashes by checking if hierarchy capture returns empty
+
+                                // Capture hierarchy - if app crashed, this will return empty
+                                // This is the fastest approach since we need the hierarchy anyway
                                 let afterHierarchy = analyzer.capture(from: app)
+
+                                // CRASH DETECTION: Empty hierarchy after successful action = crash
+                                // HierarchyAnalyzer returns empty elements when app is not running
+                                if afterHierarchy.elements.isEmpty && !beforeHierarchy.elements.isEmpty {
+
+                                    let crashStep = ExplorationStep.from(
+                                        decision: currentDecision,
+                                        hierarchy: beforeHierarchy,
+                                        wasSuccessful: false,
+                                        screenshotPath: screenshotPath,
+                                        didCauseCrash: true,
+                                        aiPrompt: aiPrompt,
+                                        aiResponse: aiResponse
+                                    )
+                                    crawler.explorationPath?.addStep(crashStep)
+
+                                    // Generate crash test IMMEDIATELY when crash is detected
+                                    if config.generateTests,
+                                       let explorationPath = crawler.explorationPath,
+                                       let outputDir = outputDir {
+                                        do {
+                                            let crashTestFileURL = outputDir.appendingPathComponent("CrashReproductionTest.swift")
+                                            try explorationPath.saveCrashTest(for: crashStep, to: crashTestFileURL)
+                                        } catch {
+                                            print("⚠️  Failed to save crash test immediately: \(error)")
+                                        }
+                                    }
+
+                                    // Don't throw - just exit exploration to allow test generation
+                                    print("💥 Ending exploration due to crash")
+                                    // Set flag and break out of retry loop
+                                    crashDetected = true
+                                    break
+                                }
 
                                 verificationResult = crawler.verifyAction(
                                     decision: currentDecision,
@@ -236,20 +367,12 @@ public class Scout: XCTestCase, @unchecked Sendable {
                                 } else {
                                     verificationsFailed += 1
 
-                                    if config.verboseOutput {
-                                        print("⚠️  Verification failed: \(verificationResult!.reason)")
-                                    }
-
                                     // Try next alternative if available
                                     attemptNumber += 1
                                     if attemptNumber < maxAttempts,
                                        attemptNumber - 1 < currentDecision.alternativeActions.count {
                                         retryAttempts += 1
                                         let alternativeAction = currentDecision.alternativeActions[attemptNumber - 1]
-
-                                        if config.verboseOutput {
-                                            print("🔄 Retrying with alternative: \(alternativeAction)")
-                                        }
 
                                         // Convert alternative to decision
                                         currentDecision = try await crawler.convertAlternativeToDecision(
@@ -267,6 +390,11 @@ public class Scout: XCTestCase, @unchecked Sendable {
                             }
                         }
 
+                        // If crash detected, break out of exploration loop
+                        if crashDetected {
+                            break
+                        }
+
                         // 5. Record step with verification result and screenshot path
                         let step = ExplorationStep.from(
                             decision: currentDecision,
@@ -274,7 +402,9 @@ public class Scout: XCTestCase, @unchecked Sendable {
                             wasSuccessful: actionSuccessful && (verificationResult?.passed ?? true),
                             verificationResult: verificationResult,
                             wasRetry: attemptNumber > 0,
-                            screenshotPath: screenshotPath
+                            screenshotPath: screenshotPath,
+                            aiPrompt: aiPrompt,
+                            aiResponse: aiResponse
                         )
                         crawler.explorationPath?.addStep(step)
                     }
@@ -300,12 +430,17 @@ public class Scout: XCTestCase, @unchecked Sendable {
         // Get action statistics from exploration path
         let (successfulActions, failedActions) = crawler.explorationPath?.successRate ?? (0, 0)
 
-        // Generate test files if configured and there were failures
+        // Check if we have crashes
+        let hasCrashes = crawler.explorationPath?.steps.contains { $0.didCauseCrash } ?? false
+        let crashesDetected = hasCrashes ? 1 : 0
+
+        // Generate test files if configured and there were failures or crashes
         var testFileURL: URL?
         var reportFileURL: URL?
+        var crashTestFileURL: URL?
         var dashboardURL: URL?
 
-        if config.generateTests, let explorationPath = crawler.explorationPath, failedActions > 0 {
+        if config.generateTests, let explorationPath = crawler.explorationPath, (failedActions > 0 || hasCrashes) {
             do {
                 // Use the SAME output directory that was created for screenshots
                 let finalOutputDir = outputDir ?? {
@@ -318,18 +453,35 @@ public class Scout: XCTestCase, @unchecked Sendable {
 
                 try FileManager.default.createDirectory(at: finalOutputDir, withIntermediateDirectories: true)
 
-                // Save test suite
-                testFileURL = finalOutputDir.appendingPathComponent("GeneratedTests.swift")
-                try explorationPath.saveTestSuite(to: testFileURL!, className: "GeneratedUITests")
+                // Save test suite (if there were non-crash failures)
+                if failedActions > 0 {
+                    testFileURL = finalOutputDir.appendingPathComponent("GeneratedTests.swift")
+                    try explorationPath.saveTestSuite(to: testFileURL!, className: "GeneratedUITests")
+                }
 
-                // Save failure report
-                reportFileURL = finalOutputDir.appendingPathComponent("FailureReport.md")
-                try explorationPath.saveFailureReport(to: reportFileURL!)
+                // Save crash test (if crash detected)
+                if hasCrashes, let crashStep = explorationPath.steps.first(where: { $0.didCauseCrash }) {
+                    crashTestFileURL = finalOutputDir.appendingPathComponent("CrashReproductionTest.swift")
+                    try explorationPath.saveCrashTest(for: crashStep, to: crashTestFileURL!)
+                }
+
+                // Save failure report (if there were non-crash failures)
+                if failedActions > 0 {
+                    reportFileURL = finalOutputDir.appendingPathComponent("FailureReport.md")
+                    try explorationPath.saveFailureReport(to: reportFileURL!)
+                }
 
                 if config.verboseOutput {
                     print("\n📁 Generated test artifacts:")
-                    print("   Tests: \(testFileURL!.path)")
-                    print("   Report: \(reportFileURL!.path)")
+                    if let testFile = testFileURL {
+                        print("   Tests: \(testFile.path)")
+                    }
+                    if let crashTest = crashTestFileURL {
+                        print("   💥 Crash Test: \(crashTest.path)")
+                    }
+                    if let report = reportFileURL {
+                        print("   Report: \(report.path)")
+                    }
                 }
             } catch {
                 print("⚠️  Failed to save test artifacts: \(error)")
@@ -350,7 +502,8 @@ public class Scout: XCTestCase, @unchecked Sendable {
             verificationsPassed: verificationStats.1,
             verificationsFailed: verificationStats.2,
             retryAttempts: verificationStats.3,
-            startTime: startTime
+            startTime: startTime,
+            crashesDetected: crashesDetected
         )
 
         // Generate interactive HTML dashboard
@@ -382,7 +535,15 @@ public class Scout: XCTestCase, @unchecked Sendable {
 
                 // Generate dashboard HTML
                 let dashboardGenerator = DashboardGenerator()
-                let testCode = testFileURL != nil ? try? String(contentsOf: testFileURL!, encoding: .utf8) : nil
+                // Use crash test code if no regular test file exists (crash-only scenarios)
+                let testCode: String?
+                if let testFile = testFileURL {
+                    testCode = try? String(contentsOf: testFile, encoding: .utf8)
+                } else if let crashTest = crashTestFileURL {
+                    testCode = try? String(contentsOf: crashTest, encoding: .utf8)
+                } else {
+                    testCode = nil
+                }
                 let htmlContent = dashboardGenerator.generate(
                     result: result,
                     generatedTestCode: testCode,
@@ -408,6 +569,41 @@ public class Scout: XCTestCase, @unchecked Sendable {
                 }
             } catch {
                 print("⚠️  Failed to generate dashboard: \(error)")
+            }
+        }
+
+        // Export exploration data in backend-compatible format
+        if let explorationPath = crawler.explorationPath {
+            do {
+                // Determine output directory (reuse existing or create new)
+                let explorationDataOutputDir: URL
+                if let existingOutputDir = outputDir {
+                    explorationDataOutputDir = existingOutputDir
+                } else {
+                    // Create directory if not already created
+                    explorationDataOutputDir = try determineOutputDirectory(
+                        configured: config.outputDirectory,
+                        sessionId: explorationPath.sessionId,
+                        saveToProjectRoot: config.saveToProjectRoot
+                    )
+                    try FileManager.default.createDirectory(at: explorationDataOutputDir, withIntermediateDirectories: true)
+                }
+
+                // Save exploration.json for backend upload
+                let explorationDataFile = explorationDataOutputDir.appendingPathComponent("exploration.json")
+                let exporter = ExplorationExporter()
+                try exporter.saveBackendData(
+                    explorationPath: explorationPath,
+                    navigationGraph: crawler.navigationGraph,
+                    to: explorationDataFile,
+                    metadata: explorationPath.metadata
+                )
+
+                if config.verboseOutput {
+                    print("   Exploration Data: \(explorationDataFile.path)")
+                }
+            } catch {
+                print("⚠️  Failed to export exploration data: \(error)")
             }
         }
 
@@ -549,55 +745,41 @@ public class Scout: XCTestCase, @unchecked Sendable {
 
     /// Print a formatted exploration summary for EMs
     nonisolated private static func printExplorationSummary(result: ExplorationResult, config: ExplorationConfig) {
-        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("📊 EXPLORATION SUMMARY")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print()
-        print("✅ Coverage: \(result.screensDiscovered) screens, \(result.transitions) transitions")
-        print("⏱️ Duration: \(Int(result.duration))s")
-        print("🎯 Success Rate: \(result.successRatePercent)% (\(result.successfulActions)/\(result.totalActions) actions)")
 
-        // Show verification metrics (Phase 3)
-        if config.enableVerification && result.verificationsPerformed > 0 {
-            print()
-            print("🔍 Verification: \(result.verificationSuccessRate)% pass rate (\(result.verificationsPassed)/\(result.verificationsPerformed))")
-            if result.retryAttempts > 0 {
-                print("🔄 Retries: \(result.retryAttempts) alternative actions attempted")
-            }
+        // Show crash information
+        if result.crashesDetected > 0 {
+            print("""
+            💥 CRASH DETECTED: App crashed during exploration
+            
+            A crash reproduction test has been generated
+            """)
         }
 
         if result.hasCriticalFailures {
-            print()
-            print("⚠️  ISSUES FOUND: \(result.failedActions)")
-            print()
-            print("  Check the generated test file for reproduction steps")
-        } else {
-            print()
+            print("""
+            ⚠️  ISSUES FOUND: \(result.failedActions)
+
+            Check the generated test file for reproduction steps
+            """)
+        } else if result.crashesDetected == 0 {
             print("🎉 Perfect Exploration! All interactions succeeded.")
         }
 
         if let testFile = result.generatedTestFile, let reportFile = result.generatedReportFile {
-            print()
-            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            print("📁 GENERATED FILES")
-            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            print()
-            print("Tests:  file://\(testFile.path)")
-            print("Report: file://\(reportFile.path)")
-            print()
-            print("💡 NEXT STEPS")
-            print()
-            print("1. Review the failure report for details")
-            print("2. Add GeneratedTests.swift to your test target")
-            print("3. Run tests to verify the issues")
-            print("4. Track success rate over time")
+            print("""
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            📁 GENERATED FILES
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+            Tests:  file://\(testFile.path)
+            Report: file://\(reportFile.path)
+            """)
         }
 
-        print()
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print()
-        print("Generated by AITestScout")
-        print("https://github.com/xamrock/ai-test-scout")
-        print()
+        print("""
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        Generated by Xamrock AITestScout
+        https://github.com/xamrock/ai-test-scout
+        """)
     }
 }

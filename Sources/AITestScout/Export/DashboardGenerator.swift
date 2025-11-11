@@ -110,8 +110,10 @@ public class DashboardGenerator {
 
     private func heroStatusCard(result: ExplorationResult) -> String {
         let healthScore = calculateHealthScore(result: result)
-        let statusIcon = result.hasCriticalFailures ? "⚠️" : "✅"
-        let statusText = result.hasCriticalFailures ? "Issues Found" : "All Clear"
+        // Crashes take priority over other failures
+        let hasCrashes = result.crashesDetected > 0
+        let statusIcon = hasCrashes ? "💥" : (result.hasCriticalFailures ? "⚠️" : "✅")
+        let statusText = hasCrashes ? "Crash Detected" : (result.hasCriticalFailures ? "Issues Found" : "All Clear")
 
         return """
         <section class="hero-card">
@@ -165,6 +167,7 @@ public class DashboardGenerator {
                         <option value="all">All Steps</option>
                         <option value="success">✅ Success Only</option>
                         <option value="failed">❌ Failed Only</option>
+                        <option value="crash">💥 Crashes Only</option>
                         <option value="retry">🔄 Retries Only</option>
                     </select>
                 </div>
@@ -178,9 +181,12 @@ public class DashboardGenerator {
 
     private func renderTimelineSteps(_ steps: [ExplorationStep]) -> String {
         return steps.enumerated().map { index, step in
-            let statusClass = step.wasSuccessful ? "step-success" : "step-failure"
-            let icon = step.wasSuccessful ? "✅" : "❌"
+            // Crash steps get special treatment
+            let isCrash = step.didCauseCrash
+            let statusClass = isCrash ? "step-crash" : (step.wasSuccessful ? "step-success" : "step-failure")
+            let icon = isCrash ? "💥" : (step.wasSuccessful ? "✅" : "❌")
             let retryBadge = step.wasRetry ? "<span class=\"retry-badge\">🔄 Retry</span>" : ""
+            let crashBadge = isCrash ? "<span class=\"crash-badge\">💥 CRASH</span>" : ""
             let targetText = step.targetElement ?? "N/A"
             let textTyped = step.textTyped.map { text in " \"\(text)\"" } ?? ""
             let confidence = step.confidence
@@ -216,8 +222,37 @@ public class DashboardGenerator {
                 screenshotHTML = ""
             }
 
+            // AI Interaction section
+            let aiInteractionHTML: String
+            if !step.aiPrompt.isEmpty || !step.aiResponse.isEmpty {
+                aiInteractionHTML = """
+                <div class="ai-interaction-section">
+                    <div class="ai-section-header" onclick="event.stopPropagation(); toggleAISection(\(index))">
+                        <span class="ai-section-title">🤖 AI Interaction</span>
+                        <span class="ai-expand-hint">(click to expand)</span>
+                    </div>
+                    <div class="ai-section-content" id="ai-section-\(index)">
+                        \(!step.aiPrompt.isEmpty ? """
+                        <div class="ai-prompt">
+                            <div class="ai-label">📝 Prompt Sent:</div>
+                            <pre class="ai-code">\(escapeHtml(step.aiPrompt))</pre>
+                        </div>
+                        """ : "")
+                        \(!step.aiResponse.isEmpty ? """
+                        <div class="ai-response">
+                            <div class="ai-label">🤖 Response Received:</div>
+                            <pre class="ai-code">\(escapeHtml(step.aiResponse))</pre>
+                        </div>
+                        """ : "")
+                    </div>
+                </div>
+                """
+            } else {
+                aiInteractionHTML = ""
+            }
+
             return """
-            <div class="timeline-item \(statusClass)" data-step="\(index)" data-action="\(step.action)" data-success="\(step.wasSuccessful)" data-retry="\(step.wasRetry)">
+            <div class="timeline-item \(statusClass)" data-step="\(index)" data-action="\(step.action)" data-success="\(step.wasSuccessful)" data-retry="\(step.wasRetry)" data-crash="\(isCrash)">
                 <div class="timeline-connector"></div>
                 <div class="timeline-marker">\(icon)</div>
                 <div class="timeline-card" onclick="toggleStep(\(index))">
@@ -226,6 +261,7 @@ public class DashboardGenerator {
                             <span class="step-number">#\(index + 1)</span>
                             <span class="step-action">\(step.action.uppercased())</span>
                             <span class="step-target">\(escapeHtml(targetText))\(escapeHtml(textTyped))</span>
+                            \(crashBadge)
                             \(retryBadge)
                         </div>
                         <div class="timeline-compact-right">
@@ -254,6 +290,7 @@ public class DashboardGenerator {
                         </div>
                         \(verificationHTML)
                         \(screenshotHTML)
+                        \(aiInteractionHTML)
                     </div>
                 </div>
             </div>
@@ -368,6 +405,25 @@ public class DashboardGenerator {
                 </div>
                 <div class="metric-value">\(result.retryAttempts)</div>
                 <div class="metric-detail">Alternative actions tried</div>
+            </div>
+            """
+        }
+
+        // Add crash metrics if crashes detected
+        if result.crashesDetected > 0 {
+            metricsHTML += """
+            <div class="metric-item metric-crash">
+                <div class="metric-header">
+                    <span class="metric-icon">💥</span>
+                    <span class="metric-title">Crash Detected</span>
+                </div>
+                <div class="metric-value">\(result.crashesDetected)</div>
+                <div class="metric-detail">App crashed during exploration</div>
+                <div class="metric-action">
+                    <button class="btn btn-small" onclick="document.getElementById('timeline-filter').value='crash'; document.getElementById('timeline-filter').dispatchEvent(new Event('change'));">
+                        View Crash Steps
+                    </button>
+                </div>
             </div>
             """
         }
@@ -910,6 +966,23 @@ public class DashboardGenerator {
             background: rgba(239, 68, 68, 0.15);
         }
 
+        .step-crash .timeline-marker {
+            border-color: var(--warning);
+            background: rgba(245, 165, 36, 0.2);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                transform: scale(1);
+                opacity: 1;
+            }
+            50% {
+                transform: scale(1.1);
+                opacity: 0.8;
+            }
+        }
+
         .timeline-card {
             flex: 1;
             background: rgba(255, 255, 255, 0.02);
@@ -927,6 +1000,11 @@ public class DashboardGenerator {
 
         .step-failure .timeline-card {
             border-left: 2px solid var(--error);
+        }
+
+        .step-crash .timeline-card {
+            border-left: 3px solid var(--warning);
+            background: rgba(245, 165, 36, 0.05);
         }
 
         .timeline-compact {
@@ -983,6 +1061,19 @@ public class DashboardGenerator {
             font-size: 0.7rem;
             color: var(--warning);
             flex-shrink: 0;
+        }
+
+        .crash-badge {
+            padding: 4px 8px;
+            background: rgba(245, 165, 36, 0.2);
+            border: 1px solid var(--warning);
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: var(--warning);
+            flex-shrink: 0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
         .confidence-badge {
@@ -1088,6 +1179,108 @@ public class DashboardGenerator {
             flex: 1;
             font-size: 0.875rem;
             color: var(--text-secondary);
+        }
+
+        /* AI Interaction Section */
+        .ai-interaction-section {
+            margin-top: 16px;
+            border-top: 1px solid var(--border-subtle);
+            padding-top: 16px;
+        }
+
+        .ai-section-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px;
+            background: rgba(94, 106, 210, 0.08);
+            border: 1px solid rgba(94, 106, 210, 0.2);
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all var(--transition);
+            user-select: none;
+        }
+
+        .ai-section-header:hover {
+            background: rgba(94, 106, 210, 0.12);
+            border-color: rgba(94, 106, 210, 0.3);
+        }
+
+        .ai-section-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .ai-expand-hint {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-left: auto;
+        }
+
+        .ai-section-content {
+            display: none;
+            margin-top: 12px;
+            animation: slideDown 0.2s ease-out;
+        }
+
+        .ai-section-content.visible {
+            display: block;
+        }
+
+        .ai-prompt,
+        .ai-response {
+            margin-bottom: 16px;
+        }
+
+        .ai-prompt:last-child,
+        .ai-response:last-child {
+            margin-bottom: 0;
+        }
+
+        .ai-label {
+            font-size: 0.8125rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .ai-code {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            padding: 16px;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', monospace;
+            font-size: 0.75rem;
+            line-height: 1.6;
+            color: var(--text-secondary);
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .ai-code::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        .ai-code::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+            border-radius: 4px;
+        }
+
+        .ai-code::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+
+        .ai-code::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.15);
         }
 
         /* Screenshot Preview */
@@ -1293,6 +1486,27 @@ public class DashboardGenerator {
             border: 1px solid var(--border-subtle);
             border-radius: 8px;
             padding: 20px;
+        }
+
+        .metric-item.metric-crash {
+            background: rgba(245, 165, 36, 0.05);
+            border: 1px solid rgba(245, 165, 36, 0.3);
+        }
+
+        .metric-action {
+            margin-top: 12px;
+        }
+
+        .metric-action .btn {
+            width: 100%;
+            background: var(--warning);
+            color: var(--bg-primary);
+            font-weight: 600;
+            border: none;
+        }
+
+        .metric-action .btn:hover {
+            background: var(--accent-purple);
         }
 
         .metric-header {
@@ -1556,6 +1770,14 @@ public class DashboardGenerator {
             }
         }
 
+        // Toggle AI interaction section
+        function toggleAISection(stepIndex) {
+            const aiSection = document.getElementById(`ai-section-${stepIndex}`);
+            if (aiSection) {
+                aiSection.classList.toggle('visible');
+            }
+        }
+
         // Toggle section expansion
         function toggleSection(sectionId) {
             const section = document.getElementById(`section-${sectionId}`);
@@ -1684,6 +1906,7 @@ public class DashboardGenerator {
                     const action = item.dataset.action.toLowerCase();
                     const isSuccess = item.dataset.success === 'true';
                     const isRetry = item.dataset.retry === 'true';
+                    const isCrash = item.dataset.crash === 'true';
                     const card = item.querySelector('.timeline-card');
                     const text = card ? card.textContent.toLowerCase() : '';
 
@@ -1696,6 +1919,8 @@ public class DashboardGenerator {
                         matchesFilter = isSuccess;
                     } else if (filterValue === 'failed') {
                         matchesFilter = !isSuccess;
+                    } else if (filterValue === 'crash') {
+                        matchesFilter = isCrash;
                     } else if (filterValue === 'retry') {
                         matchesFilter = isRetry;
                     }
