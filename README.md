@@ -6,7 +6,7 @@ Stop writing boilerplate UI tests. AITestScout explores your iOS app autonomousl
 
 ```swift
 // One line to explore your app with AI
-let result = try Scout.explore(app, steps: 20)
+let result = try Scout.explore(app)
 
 // Tests are automatically generated when failures are detected
 print("Discovered \(result.screensDiscovered) screens")
