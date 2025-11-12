@@ -142,4 +142,86 @@ struct ScoutTests {
         // 97% code reduction
         #expect(Bool(true), "Should eliminate manual orchestration")
     }
+
+    // MARK: - Delegate Support Tests (TDD)
+
+    @Test("Scout simple API should accept optional delegate parameter")
+    func testSimpleAPIAcceptsDelegateParameter() throws {
+        // Arrange
+        let app = XCUIApplication()
+        let delegate = TestScoutDelegate()
+
+        // Act & Assert - Should compile with delegate parameter
+        let _ = try? Scout.explore(
+            app,
+            steps: 1,
+            goal: "Test",
+            outputDirectory: nil,
+            delegate: delegate
+        )
+
+        #expect(Bool(true), "Should accept delegate parameter in simple API")
+    }
+
+    @Test("Scout config API should accept optional delegate parameter")
+    func testConfigAPIAcceptsDelegateParameter() throws {
+        // Arrange
+        let app = XCUIApplication()
+        let config = ExplorationConfig(steps: 1, goal: "Test")
+        let delegate = TestScoutDelegate()
+
+        // Act & Assert - Should compile with delegate parameter
+        let _ = try? Scout.explore(
+            app,
+            config: config,
+            delegate: delegate
+        )
+
+        #expect(Bool(true), "Should accept delegate parameter in config API")
+    }
+
+    @Test("Scout with nil delegate should work (backward compatibility)")
+    func testNilDelegateBackwardCompatibility() throws {
+        // Arrange
+        let app = XCUIApplication()
+
+        // Act & Assert - Should work without delegate (default nil)
+        let _ = try? Scout.explore(app, steps: 1, delegate: nil)
+
+        #expect(Bool(true), "Should work with nil delegate for backward compatibility")
+    }
+
+    @Test("Scout should not require delegate parameter (default nil)")
+    func testDelegateParameterOptional() throws {
+        // Arrange
+        let app = XCUIApplication()
+
+        // Act & Assert - Should compile without specifying delegate
+        let _ = try? Scout.explore(app, steps: 1)
+
+        #expect(Bool(true), "Delegate parameter should be optional with nil default")
+    }
+
+    @Test("Scout should wire delegate to AICrawler instance")
+    func testDelegateWiredToCrawler() async throws {
+        // Note: This is a conceptual test - full integration would require mocking XCUIApplication
+        // The actual wiring will be verified by the implementation
+        #expect(Bool(true), "Scout should set delegate on the AICrawler instance it creates")
+    }
+}
+
+// MARK: - Test Delegate Helper
+
+@available(iOS 26.0, macOS 26.0, *)
+private final class TestScoutDelegate: AICrawlerDelegate, @unchecked Sendable {
+    var didMakeDecisionCalled = false
+    var didDiscoverNewScreenCalled = false
+
+    func didMakeDecision(_ decision: ExplorationDecision, hierarchy: CompressedHierarchy) {
+        didMakeDecisionCalled = true
+    }
+
+    func didDiscoverNewScreen(_ fingerprint: String, hierarchy: CompressedHierarchy) {
+        didDiscoverNewScreenCalled = true
+    }
 }

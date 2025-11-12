@@ -177,6 +177,44 @@ try result.assertSuccessRate(minPercent: 80)
 try result.assertNoCriticalIssues()
 ```
 
+**Integrate with Third-Party Frameworks:**
+
+Use delegates to run custom actions during exploration (accessibility scanning, analytics, performance monitoring, etc.):
+
+```swift
+// Example: Accessibility scanning delegate
+class AccessibilityScoutDelegate: AICrawlerDelegate {
+    let scanner = AxeAccessibilityScanner()
+
+    func didDiscoverNewScreen(_ fingerprint: String, hierarchy: CompressedHierarchy) {
+        // Run accessibility scan on every new screen
+        let issues = scanner.scan(hierarchy)
+        if !issues.isEmpty {
+            print("⚠️ Found \(issues.count) accessibility issues")
+        }
+    }
+}
+
+// Example: Analytics & performance tracking delegate
+class AnalyticsScoutDelegate: AICrawlerDelegate {
+    func didMakeDecision(_ decision: ExplorationDecision, hierarchy: CompressedHierarchy) {
+        Analytics.logAIDecision(decision)
+    }
+
+    func didRecordTransition(from: String, to: String, action: Action, duration: TimeInterval) {
+        if duration > 2.0 {
+            PerformanceMonitor.reportSlowTransition(duration: duration)
+        }
+    }
+}
+
+// Use delegates during exploration
+let accessibilityDelegate = AccessibilityScoutDelegate()
+let result = try Scout.explore(app, steps: 20, delegate: accessibilityDelegate)
+```
+
+This allows AITestScout to integrate seamlessly with your existing test infrastructure without modification.
+
 ---
 
 ## Community & Support

@@ -350,7 +350,7 @@ struct AICrawlerDelegateTests {
 
 /// Test delegate implementation for testing
 @available(iOS 26.0, macOS 26.0, *)
-private class TestCrawlerDelegate: AICrawlerDelegate {
+private final class TestCrawlerDelegate: AICrawlerDelegate, @unchecked Sendable {
     var willMakeDecisionHandler: ((CompressedHierarchy) -> Void)?
     var didMakeDecisionHandler: ((ExplorationDecision, CompressedHierarchy) -> Void)?
     var didDiscoverNewScreenHandler: ((String, CompressedHierarchy) -> Void)?
@@ -395,6 +395,6 @@ private class TestCrawlerDelegate: AICrawlerDelegate {
 
 /// Empty delegate for testing optional methods
 @available(iOS 26.0, macOS 26.0, *)
-private class EmptyTestDelegate: AICrawlerDelegate {
+private final class EmptyTestDelegate: AICrawlerDelegate {
     // All methods are optional - no implementations
 }

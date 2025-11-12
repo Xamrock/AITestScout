@@ -73,13 +73,14 @@ public class Scout: XCTestCase, @unchecked Sendable {
         _ app: XCUIApplication,
         steps: Int = 20,
         goal: String = "Explore the app systematically",
-        outputDirectory: URL? = nil
+        outputDirectory: URL? = nil,
+        delegate: AICrawlerDelegate? = nil
     ) throws -> ExplorationResult {
         return try explore(app, config: ExplorationConfig(
             steps: steps,
             goal: goal,
             outputDirectory: outputDirectory
-        ))
+        ), delegate: delegate)
     }
 
     /// Explore an app with detailed configuration
@@ -87,11 +88,13 @@ public class Scout: XCTestCase, @unchecked Sendable {
     /// - Parameters:
     ///   - app: The XCUIApplication to explore
     ///   - config: Exploration configuration
+    ///   - delegate: Optional delegate for observing and customizing crawler behavior
     /// - Returns: ExplorationResult with discovered screens, transitions, and navigation graph
     /// - Throws: Errors from component initialization or action execution
     nonisolated public static func explore(
         _ app: XCUIApplication,
-        config: ExplorationConfig
+        config: ExplorationConfig,
+        delegate: AICrawlerDelegate? = nil
     ) throws -> ExplorationResult {
         // Create a temporary test case instance for xcAwait
         let testCase = Scout()
@@ -106,8 +109,13 @@ public class Scout: XCTestCase, @unchecked Sendable {
         let analyzer = HierarchyAnalyzer()
 
         // REUSES: AICrawler (existing component) via xcAwait helper
+        // Create crawler and set delegate together on MainActor
         let crawler = try testCase.xcAwait {
-            try await AICrawler()
+            let newCrawler = try await AICrawler()
+            if let delegate = delegate {
+                newCrawler.delegate = delegate
+            }
+            return newCrawler
         }
 
         // Set fixture if provided in config

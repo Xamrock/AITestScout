@@ -31,7 +31,7 @@ import Foundation
 /// }
 /// ```
 @available(macOS 26.0, iOS 26.0, *)
-public protocol AICrawlerDelegate: AnyObject {
+public protocol AICrawlerDelegate: AnyObject, Sendable {
 
     // MARK: - Decision Lifecycle
 

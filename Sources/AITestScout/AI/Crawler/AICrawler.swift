@@ -24,7 +24,7 @@ public class AICrawler {
     private let maxActionsPerScreen: Int = 3
 
     /// Optional delegate for observing crawler events and extending behavior
-    public weak var delegate: AICrawlerDelegate?
+    nonisolated(unsafe) public weak var delegate: AICrawlerDelegate?
 
     /// Fixture resolver for generating test values
     private var fixtureResolver: FixtureResolver?
