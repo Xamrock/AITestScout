@@ -27,12 +27,7 @@ final class AIExplorationTests: XCTestCase {
         app.launch()
 
         // AI explores your app autonomously
-        let result = try Scout.explore(app, steps: 20)
-
-        // Verify exploration completed successfully
-        try result.assertDiscovered(minScreens: 3)
-        print("✅ Discovered \(result.screensDiscovered) screens")
-        print("✅ Found \(result.transitions) transitions")
+        let result = try Scout.explore(app)
 
         // Tests are auto-generated if failures occur
         if let testFile = result.generatedTestFile {
